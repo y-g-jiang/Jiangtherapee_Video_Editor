@@ -1,0 +1,24 @@
+﻿# Runtime and generated files
+__pycache__/
+*.pyc
+build/
+build-onefile/
+dist/
+dist-onefile/
+exports/
+logs/
+*.log
+waveform-*.json
+*.sendcmd.txt
+*.ffprobe.json
+
+# Local project state
+exposure-curve.json
+audio-loudness-curve.json
+JiangtherapeeVideoEditor.exe
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
