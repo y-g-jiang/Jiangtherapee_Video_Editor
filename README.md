@@ -42,6 +42,8 @@ Or run the PowerShell launcher:
 
 The app launches mpv inside the main window automatically. If the player is closed, press `Launch`.
 
+To switch the target video, press `Open Video` and choose another local video file. The app stops the current embedded mpv instance, resets the edit curves for the new clip, reloads duration/audio metadata, and launches the new video automatically. `Save State` before switching if you want to keep the old clip's curves.
+
 ## Playback Controls
 
 - `Space`: pause or continue playback.

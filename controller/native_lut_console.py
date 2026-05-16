@@ -14,7 +14,8 @@ from tkinter import filedialog, ttk
 
 
 ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
-VIDEO = Path.home() / "Downloads" / "PN921798.MOV"
+DEFAULT_VIDEO = Path.home() / "Downloads" / "PN921798.MOV"
+VIDEO = DEFAULT_VIDEO
 LUT = (
     Path.home()
     / "Documents"
@@ -451,6 +452,7 @@ class JiangtherapeeVideoEditor:
         except FileNotFoundError:
             self.ffmpeg = ""
         self.process: subprocess.Popen | None = None
+        self.video_path = DEFAULT_VIDEO
         self.exposure = 0.0
         self.audio_db_by_track: list[float] = [0.0 for _ in range(AUDIO_TRACK_COUNT)]
         self.audio_db = 0.0
@@ -537,7 +539,7 @@ class JiangtherapeeVideoEditor:
         self.root.after(500, self.launch)
         self.root.after(250, self.refresh_playhead)
         self.root.after(900, self.refresh_metrics)
-        self.log("app.ready", log=str(self.logger.path), video=str(VIDEO), lut=str(LUT))
+        self.log("app.ready", log=str(self.logger.path), video=str(self.video_path), lut=str(LUT))
 
     def log(self, event: str, **fields: object) -> None:
         if hasattr(self, "logger"):
@@ -628,6 +630,73 @@ class JiangtherapeeVideoEditor:
             else:
                 self.log("audio.track.preview_select_ok", track=track + 1, aid=aid)
 
+    def reset_edit_state_for_video(self, duration: float | None = None) -> None:
+        if duration is not None and duration > 0:
+            self.duration = float(duration)
+        self.current_time = 0.0
+        self.timeline_window = min(max(FRAME_STEP, 20.0), max(FRAME_STEP, self.duration))
+        self.timeline_center = 0.0
+        self.exposure = 0.0
+        self.audio_db_by_track = [0.0 for _ in range(AUDIO_TRACK_COUNT)]
+        self.audio_db = 0.0
+        self.last_sent_exposure = None
+        self.last_sent_audio_db_by_track = [None for _ in range(AUDIO_TRACK_COUNT)]
+        self.last_sent_audio_db = None
+        self.curve_points = [{"time": 0.0, "ev": 0.0}, {"time": self.duration, "ev": 0.0}]
+        self.audio_points_by_track = [self.default_audio_points() for _ in range(AUDIO_TRACK_COUNT)]
+        primary = self.selected_audio_track()
+        self.audio_points = self.audio_points_by_track[primary]
+        self.waveform_peaks_by_track = [[] for _ in range(AUDIO_TRACK_COUNT)]
+        self.waveform_loading_by_track = [False for _ in range(AUDIO_TRACK_COUNT)]
+        self.waveform_peaks = self.waveform_peaks_by_track[primary]
+        self.waveform_loading = False
+        self.detected_audio_tracks = AUDIO_TRACK_COUNT
+        self.pending_seek_time = None
+        self.seeking_timeline = False
+        self.dragging_curve_point = False
+        self.drag_point_index = None
+        self.timeline_drag_mode = None
+        self.display_time(0.0)
+        self.update_range_scale()
+        self.write_mpv_curve_state()
+
+    def open_video_dialog(self) -> None:
+        initial_dir = str(self.video_path.parent if self.video_path and self.video_path.exists() else Path.home() / "Downloads")
+        self.log("video.open.dialog", initial_dir=initial_dir)
+        path = filedialog.askopenfilename(
+            title="Open target video",
+            initialdir=initial_dir,
+            filetypes=[
+                ("Video files", "*.mov *.mp4 *.m4v *.mkv *.avi *.mts *.m2ts"),
+                ("MOV files", "*.mov"),
+                ("MP4 files", "*.mp4"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            self.log("video.open.cancel")
+            return
+        self.change_video(Path(path))
+
+    def change_video(self, path: Path) -> None:
+        path = path.expanduser().resolve()
+        if not path.exists():
+            self.status_text.set(f"Video not found: {path}")
+            self.log("video.change.failed", path=str(path), reason="not_found")
+            return
+        if self.export_process and self.export_process.poll() is None:
+            self.cancel_export()
+        self.log("video.change.start", old=str(self.video_path), new=str(path))
+        was_running = bool(self.process and self.process.poll() is None)
+        self.stop()
+        self.video_path = path
+        self.reset_edit_state_for_video()
+        self.save_curve()
+        self.status_text.set(f"Video loaded: {path.name}")
+        self.redraw_curve()
+        if was_running:
+            self.root.after(650, self.launch)
+
     def enable_aero(self) -> None:
         try:
             hwnd = self.root.winfo_id()
@@ -708,6 +777,7 @@ class JiangtherapeeVideoEditor:
         ttk.Button(curve_header, text="+1f", command=lambda: self.nudge_time(1), takefocus=False).pack(side="left", padx=(8, 0))
         ttk.Button(curve_header, text="Launch", style="Accent.TButton", command=self.launch, takefocus=False).pack(side="right", padx=(8, 0))
         ttk.Button(curve_header, text="Stop", command=self.stop, takefocus=False).pack(side="right")
+        ttk.Button(curve_header, text="Open Video", command=self.open_video_dialog, takefocus=False).pack(side="right", padx=(8, 0))
         ttk.Button(curve_header, text="Export", style="Accent.TButton", command=self.open_export_dialog, takefocus=False).pack(side="right")
         ttk.Button(curve_header, text="Cancel Export", command=self.cancel_export, takefocus=False).pack(side="right", padx=(8, 0))
         ttk.Button(curve_header, text="Restore", command=self.restore_workspace, takefocus=False).pack(side="right", padx=(8, 0))
@@ -811,7 +881,7 @@ class JiangtherapeeVideoEditor:
             f"--glsl-shader-opts=exposure={self.exposure:.3f}",
             f"--lut={mpv_path(LUT)}",
             "--lut-type=auto",
-            str(VIDEO),
+            str(self.video_path),
         ]
         self.log("mpv.launch.start", args=args, curve_state=str(MPV_CURVE_STATE))
         try:
@@ -922,8 +992,8 @@ class JiangtherapeeVideoEditor:
     def waveform_cache_path(self, track: int | None = None) -> Path:
         if track is None:
             track = self.selected_audio_track()
-        stamp = int(VIDEO.stat().st_mtime) if VIDEO.exists() else 0
-        return ROOT / f"waveform-{VIDEO.stem}-a{track + 1}-{stamp}-{WAVEFORM_RATE}.json"
+        stamp = int(self.video_path.stat().st_mtime) if self.video_path.exists() else 0
+        return ROOT / f"waveform-{self.video_path.stem}-a{track + 1}-{stamp}-{WAVEFORM_RATE}.json"
 
     def ensure_waveform_async(self) -> None:
         track = self.selected_audio_track()
@@ -963,7 +1033,7 @@ class JiangtherapeeVideoEditor:
                 "-hide_banner",
                 "-nostdin",
                 "-i",
-                str(VIDEO),
+                str(self.video_path),
                 "-map",
                 f"0:a:{track}",
                 "-vn",
@@ -1830,7 +1900,7 @@ class JiangtherapeeVideoEditor:
     def workspace_payload(self) -> dict:
         return {
             "version": 2,
-            "video": str(VIDEO),
+            "video": str(self.video_path),
             "lut": str(LUT),
             "duration": self.duration,
             "current_time": self.current_time,
@@ -1849,7 +1919,7 @@ class JiangtherapeeVideoEditor:
         }
 
     def export_workspace(self) -> None:
-        default_name = f"{VIDEO.stem}-workspace.json"
+        default_name = f"{self.video_path.stem}-workspace.json"
         self.log("workspace.save.dialog")
         path = filedialog.asksaveasfilename(
             title="Save workspace state",
@@ -1878,6 +1948,16 @@ class JiangtherapeeVideoEditor:
             return
         try:
             payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            workspace_video = payload.get("video")
+            if workspace_video:
+                workspace_video_path = Path(str(workspace_video)).expanduser()
+                if workspace_video_path.exists() and workspace_video_path.resolve() != self.video_path.resolve():
+                    self.log("workspace.restore.video_switch", path=str(workspace_video_path))
+                    self.stop()
+                    self.video_path = workspace_video_path.resolve()
+                    self.current_time = 0.0
+                    self.waveform_peaks_by_track = [[] for _ in range(AUDIO_TRACK_COUNT)]
+                    self.waveform_loading_by_track = [False for _ in range(AUDIO_TRACK_COUNT)]
             video_points = payload.get("video_points", payload.get("points", []))
             loaded_video = [
                 {"time": float(point["time"]), "ev": float(point.get("ev", 0.0))}
@@ -1914,6 +1994,7 @@ class JiangtherapeeVideoEditor:
                 quality = str(payload.get("export_quality", self.export_quality.get()))
                 if quality in EXPORT_PRESETS:
                     self.export_quality.set(quality)
+            self.update_export_estimate()
             self.exposure = round(float(payload.get("exposure", self.exposure)), 3)
             raw_db = payload.get("audio_db_by_track")
             if isinstance(raw_db, list):
@@ -1936,10 +2017,13 @@ class JiangtherapeeVideoEditor:
             self.log(
                 "workspace.restore.ok",
                 path=path,
+                video=str(self.video_path),
                 video_points=len(self.curve_points),
                 audio_points_by_track=[len(points) for points in self.audio_points_by_track],
                 active_audio_track=track + 1,
             )
+            if not self.process or self.process.poll() is not None:
+                self.root.after(650, self.launch)
         except Exception as exc:
             self.status_text.set(f"Restore failed: {exc}")
             self.log("workspace.restore.failed", path=path, error=str(exc))
@@ -2251,8 +2335,8 @@ class JiangtherapeeVideoEditor:
         ext = self.export_extension(quality)
         quality_slug = quality.replace(" ", "-")
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        self.export_output_path = EXPORTS_DIR / f"{VIDEO.stem}_{quality_slug}_{stamp}{ext}"
-        self.export_log_path = EXPORTS_DIR / f"{VIDEO.stem}_{quality_slug}_{stamp}.log"
+        self.export_output_path = EXPORTS_DIR / f"{self.video_path.stem}_{quality_slug}_{stamp}{ext}"
+        self.export_log_path = EXPORTS_DIR / f"{self.video_path.stem}_{quality_slug}_{stamp}.log"
         script = ROOT / "export-vlog-exposure.ps1"
         args = [
             "powershell",
@@ -2261,6 +2345,8 @@ class JiangtherapeeVideoEditor:
             "Bypass",
             "-File",
             str(script),
+            "-InputPath",
+            str(self.video_path),
             "-CurvePath",
             str(CURVE_PATH),
             "-AudioCurvePath",
